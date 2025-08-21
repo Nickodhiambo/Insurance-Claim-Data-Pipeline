@@ -32,6 +32,7 @@ logger = logging.getLogger('Claim pipeline')
 #-----------------------------------------
 TODAY = date(2025, 7, 30) # Fixed today from case study
 RETRYABLE = {'Missing modifier', 'Incorrect NPI', 'Prior auth required'}
+NON_RETRYABLE = {'Authorization expired', 'Incorrect provider type'}
 RECOMMENDATIONS = {
     'Missing modifier': 'Add correct CPT modifier, resubmit',
     'Incorrect NPI': 'Review provider NPI, correct and resubmit',
@@ -106,3 +107,78 @@ def load_beta(file_path: str) -> Iterable[Dict[str, Any]]:
                 'submitted_at': to_iso_date(row.get('submitted_at')),
                 'source_system': 'beta'
             }
+
+#------------------------------
+# Step 2: Eligibility Logic
+#------------------------------
+
+def classify_denial(reason: Optional[str]) -> str:
+    """Classifies a claim as either retryable, non-retryable or ambiguous"""
+    if reason is None:
+        return 'ambiguous'
+    r = reason.lower()
+    if r in RETRYABLE:
+        return 'retryable'
+    if r in NON_RETRYABLE:
+        return 'non-retryable'
+    if any(kw in r for kw in {'incorrect procedure', 'form incomplete', 'not billable'}):
+        return 'retryable'
+    return 'ambiguous'
+
+
+def is_eligible(claim: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    if claim['status'] != 'denied':
+        return False, None
+    if not claim['patient_id']:
+        return False, None
+    if not older_than(claim['submitted_at'], 7, TODAY):
+        return False, None
+    if classify_denial(claim['denial_reason']) != 'retryable':
+        return False, None
+    return True, claim['denial_reason']
+
+def recommended_changes(reason: Optional[str]) -> str:
+    if reason is None:
+        return 'Review claim details, supply missing info and resubmit'
+    return RECOMMENDATIONS.get(reason.lower(), 'Review claim details, supply missing info and resubmit')
+
+#---------------------------------------------
+# Step 3: Pipeline: Input -> Processing -> Output
+#-----------------------------------------------------
+def pipeline(input_files: List[str]) -> Dict[str, Any]:
+    candidates = List[Dict[str, Any]] # Will hold eligible claims
+
+    for path in input_files:
+        if path.endswith('csv'):
+            records = load_alpha(path)
+        elif path.endswith('.json'):
+            records = load_beta(path)
+        else:
+            logger.warning('Unsupported file type %s', path)
+            continue
+        
+        for rec in records:
+            flag, reason = is_eligible(rec)
+
+            if flag:
+                candidates.append({
+                    'claim_id': rec['claim_id'],
+                    'resubmission_reason': reason,
+                    'source_system': rec['source_system'],
+                    'recommended_changes': recommended_changes(reason)
+                })
+        output_path = 'resubmission_candidates.json'
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(candidates, f, indent=2)
+        
+        return {'output_path': output_path, 'candidates': candidates}
+    
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print('Usage: python claim_data_pipeline.py <emr_alpha.csv> [emr_beta.json]')
+        sys.exit(1)
+
+    input_files = sys.argv[1:]
+    result = pipeline(input_files)
+    logger.info('Output saved to %s', result['output_path'])
+    print(json.dumps(result['candidates']))
