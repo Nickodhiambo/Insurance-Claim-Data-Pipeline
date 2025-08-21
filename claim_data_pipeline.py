@@ -72,3 +72,37 @@ def older_than(d_iso: Optional[str], days: int, today: date) -> bool:
         return False
     d = datetime.strptime(d_iso, '%Y-%m-%d').date()
     return (today - d) > timedelta(days=days)
+
+#-----------------------------------------
+# Step 1: Schema Normalization
+#-------------------------------------------
+def load_alpha(file_path: str) -> Iterable[Dict[str, Any]]:
+    """Process CSV data (Alpha source)"""
+    with open(file_path, "r", newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            yield {
+                'claim_id': remove_whitespaces(row.get('claim_id')),
+                'patient_id': remove_whitespaces(row.get('patient_id')),
+                'procedure_code': remove_whitespaces(row.get('procedure_code')),
+                'denial_reason': (
+                    None if str(row.get('denial_reason').strip().lower in {'none', ''}) else
+                    remove_whitespaces(row.get('denial_reason'))
+                ),
+                'status': to_lower(remove_whitespaces(row.get('status'))),
+                'submitted_at': to_iso_date(row.get('submitted_at')),
+                'source_system': 'alpha'
+            }
+def load_beta(file_path: str) -> Iterable[Dict[str, Any]]:
+    with open(file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        for row in data:
+            yield {
+                'claim_id': remove_whitespaces(row.get('claim_id')),
+                'patient_id': remove_whitespaces(row.get('patient_id')),
+                'procedure_code': remove_whitespaces(row.get('procedure_code')),
+                'denial_reason': remove_whitespaces(row.get('error_msg')),
+                'status': to_lower(remove_whitespaces(row.get('status'))),
+                'submitted_at': to_iso_date(row.get('submitted_at')),
+                'source_system': 'beta'
+            }
