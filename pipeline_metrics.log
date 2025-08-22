@@ -1,0 +1,10 @@
+===== Pipeline Metrics Summary =====
+Total processed: 4
+By source: {'alpha': 0, 'beta': 4}
+Flagged for resubmission: 1
+Excluded by reason:
+  - not_denied_status: 0
+  - patient_id_missing: 0
+  - too_recent: 0
+  - non-retryable_or_ambiguous: 0
+  - malformed: 3

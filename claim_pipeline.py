@@ -3,7 +3,7 @@
 # Steps covered
     # 1) Schema Normalization
     # 2) Resubmission Eligibility Logic
-    # 3) Outputs resubmission claims to a file named resubmission_candidates
+    # 3) Outputs resubmission claims to a file named resubmission_candidates and metrics to a log file
 # Usage: The script ingests data in any of these three ways:
     # 1) csv only (alpha)
         # script.py <alpha.csv>
@@ -69,6 +69,7 @@ def to_lower(input_str: Optional[str]) -> Optional[str]:
     return input_str.lower() if input_str else None
 
 def older_than(d_iso: Optional[str], days: int, today: date) -> bool:
+    """Checks if date of current claim is older than a week from a fixed today date"""
     if not d_iso:
         return False
     d = datetime.strptime(d_iso, '%Y-%m-%d').date()
@@ -86,7 +87,7 @@ def load_alpha(file_path: str) -> Iterable[Dict[str, Any]]:
             raw = row.get('denial_reason')
             val = remove_whitespaces(raw)
             denial = None if (val is None or val.lower() in {'none', ''}) else val
-            
+
             yield {
                 'claim_id': remove_whitespaces(row.get('claim_id')),
                 'patient_id': remove_whitespaces(row.get('patient_id')),
@@ -98,6 +99,7 @@ def load_alpha(file_path: str) -> Iterable[Dict[str, Any]]:
             }
 
 def load_beta(file_path: str) -> Iterable[Dict[str, Any]]:
+    """Normalize json (beta)"""
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
         for row in data:
@@ -130,6 +132,8 @@ def classify_denial(reason: Optional[str]) -> str:
 
 
 def is_eligible(claim: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """Determine whether a claim is eligible for resubmisson based
+    on predefined business rules"""
     if claim['status'] != 'denied':
         return False, None
     if not claim['patient_id']:
@@ -151,31 +155,82 @@ def recommended_changes(reason: Optional[str]) -> str:
 def pipeline(input_files: List[str]) -> Dict[str, Any]:
     candidates: List[Dict[str, Any]] = [] # Will hold eligible claims
 
+    # Metrics
+    metrics = {
+        'total_processed': 0,
+        'by_source': {'alpha': 0, 'beta': 0},
+        'flagged_for_resubmission': 0,
+        'excluded_by_reason': {
+            'not_denied_status': 0,
+            'patient_id_missing': 0,
+            'too_recent': 0,
+            'non-retryable_or_ambiguous': 0,
+            'malformed': 0
+        }
+    }
+
     for path in input_files:
-        if path.endswith('.csv'):
-            records = load_alpha(path)
-        elif path.endswith('.json'):
-            records = load_beta(path)
-        else:
-            logger.warning('Unsupported file type %s', path)
-            continue
-        
-        for rec in records:
-            flag, reason = is_eligible(rec)
+        # Take input file from command line
+        # Checks source origin
+        # process
+        try:
+            if path.endswith(".csv"):
+                records = load_alpha(path)
+            elif path.endswith(".json"):
+                records = load_beta(path)
+            else:
+                logger.warning("Unsupported file type: %s", path)
+                continue
 
-            if flag:
-                candidates.append({
-                    'claim_id': rec['claim_id'],
-                    'resubmission_reason': reason,
-                    'source_system': rec['source_system'],
-                    'recommended_changes': recommended_changes(reason)
-                })
+            for rec in records:
+                metrics["total_processed"] += 1
+                if rec["source_system"] in metrics["by_source"]:
+                    metrics["by_source"][rec["source_system"]] += 1
 
+                try:
+                    ok, reason = is_eligible(rec) # Only flag eligible files for resubmission
+                    if ok:
+                        metrics["flagged_for_resubmission"] += 1
+                        candidates.append({
+                            "claim_id": rec["claim_id"],
+                            "resubmission_reason": reason,
+                            "source_system": rec["source_system"],
+                            "recommended_changes": recommended_changes(reason),
+                        })
+                    else:
+                        # Figure out why file is excluded from resubmission
+                        # based on business rules and inference
+                        if rec["status"] != "denied":
+                            metrics["excluded_by_reason"]["not_denied"] += 1
+                        elif not rec["patient_id"]:
+                            metrics["excluded_by_reason"]["patient_missing"] += 1
+                        elif not older_than(rec["submitted_at"], 7, TODAY):
+                            metrics["excluded_by_reason"]["too_recent"] += 1
+                        else:
+                            metrics["excluded_by_reason"]["non_retryable_or_ambiguous"] += 1
+                except Exception:
+                    metrics["excluded_by_reason"]["malformed"] += 1
+        except Exception as e:
+            logger.exception("Failed to process file %s: %s", path, e)
+            metrics["excluded_by_reason"]["malformed"] += 1
+
+    #--------------Log resubmisson candidates----------
     output_path = 'resubmission_candidates.json'
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(candidates, f, indent=2)
-    
-    return {'output_path': output_path, 'candidates': candidates}
+
+    # -------------Log metrics----------------------------
+    log_path = "pipeline_metrics.log"
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write("===== Pipeline Metrics Summary =====\n")
+        f.write(f"Total processed: {metrics['total_processed']}\n")
+        f.write(f"By source: {metrics['by_source']}\n")
+        f.write(f"Flagged for resubmission: {metrics['flagged_for_resubmission']}\n")
+        f.write("Excluded by reason:\n")
+        for reason, count in metrics["excluded_by_reason"].items():
+            f.write(f"  - {reason}: {count}\n")
+
+    return {'output_path': output_path, 'candidates': candidates, "metrics_path": log_path}
     
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -185,4 +240,3 @@ if __name__ == '__main__':
     input_files = sys.argv[1:]
     result = pipeline(input_files)
     logger.info('Output saved to %s', result['output_path'])
-    print(json.dumps(result['candidates']))
