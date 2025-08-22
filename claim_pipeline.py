@@ -31,15 +31,15 @@ logger = logging.getLogger('Claim pipeline')
 # Config
 #-----------------------------------------
 TODAY = date(2025, 7, 30) # Fixed today from case study
-RETRYABLE = {'Missing modifier', 'Incorrect NPI', 'Prior auth required'}
-NON_RETRYABLE = {'Authorization expired', 'Incorrect provider type'}
+RETRYABLE = {'missing modifier', 'incorrect npi', 'prior auth required'}
+NON_RETRYABLE = {'authorization expired', 'incorrect provider type'}
 RECOMMENDATIONS = {
-    'Missing modifier': 'Add correct CPT modifier, resubmit',
-    'Incorrect NPI': 'Review provider NPI, correct and resubmit',
-    'Prior auth required': 'Obtain/attach prior authorization and resubmit',
-    'Incorrect procedure': 'Verify CPT/HCPCS code mapping, correct if needed and resubmit',
-    'Form incomplete': 'Fill missing fields and resubmit',
-    'Not billable': 'Confirm coverage/payer policy; update claim or appeal'
+    'missing modifier': 'Add correct CPT modifier, resubmit',
+    'incorrect npi': 'Review provider NPI, correct and resubmit',
+    'prior auth required': 'Obtain/attach prior authorization and resubmit',
+    'incorrect procedure': 'Verify CPT/HCPCS code mapping, correct if needed and resubmit',
+    'form incomplete': 'Fill missing fields and resubmit',
+    'not billable': 'Confirm coverage/payer policy; update claim or appeal'
 }
 
 #------------------------------------
@@ -53,7 +53,7 @@ def to_iso_date(date_str: str) -> Optional[str]:
         return datetime.strptime(date_str, '%Y-%m-%d').date().isoformat()
     except ValueError:
         try:
-            datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S').date().isoformat()
+            return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S').date().isoformat()
         except ValueError:
             return None
     
@@ -82,29 +82,32 @@ def load_alpha(file_path: str) -> Iterable[Dict[str, Any]]:
     with open(file_path, "r", newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
+            # Handle denial reason cleanly
+            raw = row.get('denial_reason')
+            val = remove_whitespaces(raw)
+            denial = None if (val is None or val.lower() in {'none', ''}) else val
+            
             yield {
                 'claim_id': remove_whitespaces(row.get('claim_id')),
                 'patient_id': remove_whitespaces(row.get('patient_id')),
                 'procedure_code': remove_whitespaces(row.get('procedure_code')),
-                'denial_reason': (
-                    None if str(row.get('denial_reason').strip().lower in {'none', ''}) else
-                    remove_whitespaces(row.get('denial_reason'))
-                ),
+                'denial_reason': denial,
                 'status': to_lower(remove_whitespaces(row.get('status'))),
                 'submitted_at': to_iso_date(row.get('submitted_at')),
                 'source_system': 'alpha'
             }
+
 def load_beta(file_path: str) -> Iterable[Dict[str, Any]]:
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
         for row in data:
             yield {
-                'claim_id': remove_whitespaces(row.get('claim_id')),
-                'patient_id': remove_whitespaces(row.get('patient_id')),
-                'procedure_code': remove_whitespaces(row.get('procedure_code')),
+                'claim_id': remove_whitespaces(row.get('id')),
+                'patient_id': remove_whitespaces(row.get('member')),
+                'procedure_code': remove_whitespaces(row.get('code')),
                 'denial_reason': remove_whitespaces(row.get('error_msg')),
                 'status': to_lower(remove_whitespaces(row.get('status'))),
-                'submitted_at': to_iso_date(row.get('submitted_at')),
+                'submitted_at': to_iso_date(row.get('date')),
                 'source_system': 'beta'
             }
 
@@ -146,10 +149,10 @@ def recommended_changes(reason: Optional[str]) -> str:
 # Step 3: Pipeline: Input -> Processing -> Output
 #-----------------------------------------------------
 def pipeline(input_files: List[str]) -> Dict[str, Any]:
-    candidates = List[Dict[str, Any]] # Will hold eligible claims
+    candidates: List[Dict[str, Any]] = [] # Will hold eligible claims
 
     for path in input_files:
-        if path.endswith('csv'):
+        if path.endswith('.csv'):
             records = load_alpha(path)
         elif path.endswith('.json'):
             records = load_beta(path)
@@ -167,15 +170,16 @@ def pipeline(input_files: List[str]) -> Dict[str, Any]:
                     'source_system': rec['source_system'],
                     'recommended_changes': recommended_changes(reason)
                 })
-        output_path = 'resubmission_candidates.json'
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(candidates, f, indent=2)
-        
-        return {'output_path': output_path, 'candidates': candidates}
+
+    output_path = 'resubmission_candidates.json'
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(candidates, f, indent=2)
+    
+    return {'output_path': output_path, 'candidates': candidates}
     
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print('Usage: python claim_data_pipeline.py <emr_alpha.csv> [emr_beta.json]')
+        print('Usage error: python claim_data_pipeline.py <emr_alpha.csv> [emr_beta.json]')
         sys.exit(1)
 
     input_files = sys.argv[1:]
