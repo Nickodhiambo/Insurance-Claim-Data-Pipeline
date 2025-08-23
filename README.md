@@ -5,7 +5,7 @@
 
 ## 📖 Overview
 
-This is a Data Processing Pipeline for Insurance Claims
+This is a Data Processing Pipeline for Insurance Claims.
 The pipeline ingests claim data from **two heterogeneous EMR sources** (`Alpha` in CSV and `Beta` in JSON), normalizes them into a common schema, evaluates **resubmission eligibility** using defined business rules, and outputs:
 
 * A structured list of **eligible resubmission candidates** (`resubmission_candidates.json`)
